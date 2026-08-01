@@ -1,0 +1,5 @@
+LIBRARY "EvolveOS_MenuProxy"
+
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
