@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="EvolveOS_MenuProxy/EvolveOS_MenuProxy.vcxproj" />
+  <Project Path="EvolveOS_MenuProxy/EvolveOS_MenuProxy.vcxproj" Id="c7ac20fa-547a-4a3d-bd33-9956cf57a4bc" />
 </Solution>
