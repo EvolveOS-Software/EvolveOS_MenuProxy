@@ -43,16 +43,41 @@ std::wstring ExtractJsonValue(const std::wstring& json, const std::wstring& key,
     if (pos == std::wstring::npos) return L"";
     size_t startQuote = json.find(L"\"", pos);
     if (startQuote == std::wstring::npos) return L"";
-    size_t endQuote = json.find(L"\"", startQuote + 1);
-    if (endQuote == std::wstring::npos) return L"";
+
+    size_t endQuote = startQuote + 1;
+    while (endQuote < json.length()) {
+        if (json[endQuote] == L'\"') {
+            int backslashCount = 0;
+            size_t temp = endQuote - 1;
+            while (temp > startQuote && json[temp] == L'\\') {
+                backslashCount++;
+                temp--;
+            }
+            if (backslashCount % 2 == 0) {
+                break;
+            }
+        }
+        endQuote++;
+    }
+    if (endQuote >= json.length()) return L"";
 
     std::wstring val = json.substr(startQuote + 1, endQuote - startQuote - 1);
 
-    size_t replacePos = 0;
-    while ((replacePos = val.find(L"\\\\", replacePos)) != std::wstring::npos) {
-        val.replace(replacePos, 2, L"\\");
-        replacePos += 1;
-    }
+    auto replaceAll = [](std::wstring& str, const std::wstring& from, const std::wstring& to) {
+        size_t start_pos = 0;
+        while ((start_pos = str.find(from, start_pos)) != std::wstring::npos) {
+            str.replace(start_pos, from.length(), to);
+            start_pos += to.length();
+        }
+        };
+
+    replaceAll(val, L"\\\"", L"\"");   // Double quotes
+    replaceAll(val, L"\\\\", L"\\");   // Backslashes
+    replaceAll(val, L"\\u0027", L"'"); // Single quotes
+    replaceAll(val, L"\\u0026", L"&"); // Ampersands
+    replaceAll(val, L"\\u003C", L"<"); // Less than
+    replaceAll(val, L"\\u003E", L">"); // Greater than
+
     return val;
 }
 
