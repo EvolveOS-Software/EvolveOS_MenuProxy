@@ -11,6 +11,7 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <sstream> 
+#include <algorithm>
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -28,6 +29,10 @@ struct MenuItem {
     std::wstring Arguments;
     std::wstring Icon;
     std::wstring Target;
+
+    bool Extended;
+    std::wstring SpecificExtension;
+    std::wstring Position;
 };
 
 std::wstring ExtractJsonValue(const std::wstring& json, const std::wstring& key, size_t startPos = 0) {
@@ -49,6 +54,20 @@ std::wstring ExtractJsonValue(const std::wstring& json, const std::wstring& key,
         replacePos += 1;
     }
     return val;
+}
+
+bool ExtractJsonBool(const std::wstring& json, const std::wstring& key, size_t startPos = 0) {
+    std::wstring search = L"\"" + key + L"\":";
+    size_t pos = json.find(search, startPos);
+    if (pos == std::wstring::npos) {
+        search = L"\"" + key + L"\" :";
+        pos = json.find(search, startPos);
+        if (pos == std::wstring::npos) return false;
+    }
+    size_t valPos = pos + search.length();
+    while (valPos < json.length() && (json[valPos] == L' ' || json[valPos] == L'\t')) valPos++;
+    if (valPos + 4 <= json.length() && json.substr(valPos, 4) == L"true") return true;
+    return false;
 }
 
 std::vector<MenuItem> LoadCustomItems() {
@@ -77,6 +96,10 @@ std::vector<MenuItem> LoadCustomItems() {
                     item.Arguments = ExtractJsonValue(content, L"arguments", pos);
                     item.Icon = ExtractJsonValue(content, L"icon", pos);
                     item.Target = ExtractJsonValue(content, L"target", pos);
+
+                    item.Extended = ExtractJsonBool(content, L"extended", pos);
+                    item.SpecificExtension = ExtractJsonValue(content, L"specificExtension", pos);
+                    item.Position = ExtractJsonValue(content, L"position", pos);
 
                     if (!item.Title.empty() && !item.ExePath.empty()) {
                         items.push_back(item);
@@ -115,7 +138,6 @@ public:
 
     IFACEMETHODIMP GetIcon(IShellItemArray* psiItemArray, LPWSTR* ppszIcon) override {
         if (m_isRoot) {
-
             return SHStrDupW(L"imageres.dll,-114", ppszIcon);
         }
         return SHStrDupW(m_item.Icon.c_str(), ppszIcon);
@@ -126,6 +148,63 @@ public:
 
     IFACEMETHODIMP GetState(IShellItemArray* psiItemArray, BOOL fOkToBeSlow, EXPCMDSTATE* pCmdState) override {
         *pCmdState = ECS_ENABLED;
+
+        if (!m_isRoot) {
+
+            if (m_item.Extended) {
+                if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0) {
+                    *pCmdState = ECS_HIDDEN;
+                    return S_OK;
+                }
+            }
+
+            if (psiItemArray) {
+                DWORD count = 0;
+                psiItemArray->GetCount(&count);
+
+                if (count > 0) {
+                    ComPtr<IShellItem> shellItem;
+                    if (SUCCEEDED(psiItemArray->GetItemAt(0, &shellItem))) {
+
+                        SFGAOF attribs;
+                        if (SUCCEEDED(shellItem->GetAttributes(SFGAO_FOLDER | SFGAO_STREAM, &attribs))) {
+                            bool isFolder = (attribs & SFGAO_FOLDER) != 0;
+
+                            if (m_item.Target == L"Files" && isFolder) {
+                                *pCmdState = ECS_HIDDEN;
+                                return S_OK;
+                            }
+                            if (m_item.Target == L"Folders" && !isFolder) {
+                                *pCmdState = ECS_HIDDEN;
+                                return S_OK;
+                            }
+                        }
+
+                        if (!m_item.SpecificExtension.empty() && m_item.SpecificExtension != L"*") {
+                            LPWSTR pszName = NULL;
+                            if (SUCCEEDED(shellItem->GetDisplayName(SIGDN_NORMALDISPLAY, &pszName))) {
+                                std::wstring fileName = pszName;
+                                CoTaskMemFree(pszName);
+
+                                size_t dotPos = fileName.find_last_of(L".");
+                                if (dotPos != std::wstring::npos) {
+                                    std::wstring ext = fileName.substr(dotPos);
+                                    if (StrStrIW(m_item.SpecificExtension.c_str(), ext.c_str()) == NULL) {
+                                        *pCmdState = ECS_HIDDEN;
+                                        return S_OK;
+                                    }
+                                }
+                                else {
+                                    *pCmdState = ECS_HIDDEN;
+                                    return S_OK;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         return S_OK;
     }
 
@@ -176,6 +255,16 @@ class CEnumCommands : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IEnumEx
 public:
     CEnumCommands() : m_current(0) {
         auto jsonItems = LoadCustomItems();
+
+        std::sort(jsonItems.begin(), jsonItems.end(), [](const MenuItem& a, const MenuItem& b) {
+            auto getSortValue = [](const std::wstring& pos) {
+                if (pos == L"Top") return 0;
+                if (pos == L"Bottom") return 2;
+                return 1; // Default
+                };
+            return getSortValue(a.Position) < getSortValue(b.Position);
+            });
+
         for (const auto& i : jsonItems) {
             m_items.push_back(Make<CEvolveOSCommand>(false, i));
         }
