@@ -33,9 +33,6 @@ struct MenuItem {
     bool Extended;
     std::wstring SpecificExtension;
     std::wstring Position;
-
-    bool IsSubMenu;
-    std::vector<MenuItem> SubItems;
 };
 
 std::wstring ExtractJsonValue(const std::wstring& json, const std::wstring& key, size_t startPos = 0) {
@@ -140,16 +137,7 @@ std::vector<MenuItem> ParseItems(const std::wstring& jsonArray) {
         item.SpecificExtension = ExtractJsonValue(objJson, L"specificExtension");
         item.Position = ExtractJsonValue(objJson, L"position");
 
-        item.IsSubMenu = ExtractJsonBool(objJson, L"isSubMenu");
-
-        if (item.IsSubMenu) {
-            std::wstring subArr = ExtractJsonArray(objJson, L"subItems");
-            if (!subArr.empty()) {
-                item.SubItems = ParseItems(subArr);
-            }
-        }
-
-        if (!item.Title.empty() && (!item.ExePath.empty() || item.IsSubMenu)) {
+        if (!item.Title.empty() && !item.ExePath.empty()) {
             items.push_back(item);
         }
 
@@ -188,6 +176,7 @@ std::vector<MenuItem> LoadCustomItems() {
         MenuItem fallback;
         fallback.Title = L"EvolveOS (No Actions Configured)";
         fallback.ExePath = L"cmd.exe";
+        fallback.Position = L"Default";
         items.push_back(fallback);
     }
 
@@ -213,7 +202,24 @@ public:
         if (m_isRoot) {
             return SHStrDupW(L"imageres.dll,-114", ppszIcon);
         }
-        return SHStrDupW(m_item.Icon.c_str(), ppszIcon);
+        if (m_item.Icon.empty()) {
+            return E_NOTIMPL;
+        }
+
+        std::wstring icon = m_item.Icon;
+
+        if (icon.find(L",") == std::wstring::npos) {
+            std::wstring lowerIcon = icon;
+            std::transform(lowerIcon.begin(), lowerIcon.end(), lowerIcon.begin(), ::towlower);
+            if (lowerIcon.find(L".exe") != std::wstring::npos ||
+                lowerIcon.find(L".dll") != std::wstring::npos ||
+                lowerIcon.find(L".bat") != std::wstring::npos ||
+                lowerIcon.find(L".cmd") != std::wstring::npos) {
+                icon += L",0";
+            }
+        }
+
+        return SHStrDupW(icon.c_str(), ppszIcon);
     }
 
     IFACEMETHODIMP GetToolTip(IShellItemArray* psiItemArray, LPWSTR* ppszInfotip) override { return E_NOTIMPL; }
@@ -223,7 +229,6 @@ public:
         *pCmdState = ECS_ENABLED;
 
         if (!m_isRoot) {
-
             if (m_item.Extended) {
                 if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0) {
                     *pCmdState = ECS_HIDDEN;
@@ -233,13 +238,11 @@ public:
 
             if (psiItemArray) {
                 DWORD count = 0;
-                psiItemArray->GetCount(&count);
-
-                if (count > 0) {
+                if (SUCCEEDED(psiItemArray->GetCount(&count)) && count > 0) {
                     ComPtr<IShellItem> shellItem;
                     if (SUCCEEDED(psiItemArray->GetItemAt(0, &shellItem))) {
 
-                        SFGAOF attribs;
+                        SFGAOF attribs = 0;
                         if (SUCCEEDED(shellItem->GetAttributes(SFGAO_FOLDER | SFGAO_STREAM, &attribs))) {
                             bool isFolder = (attribs & SFGAO_FOLDER) != 0;
 
@@ -282,14 +285,14 @@ public:
     }
 
     IFACEMETHODIMP GetFlags(EXPCMDFLAGS* pFlags) override {
-        *pFlags = (m_isRoot || m_item.IsSubMenu) ? ECF_HASSUBCOMMANDS : ECF_DEFAULT;
+        *pFlags = m_isRoot ? ECF_HASSUBCOMMANDS : ECF_DEFAULT;
         return S_OK;
     }
 
     IFACEMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override;
 
     IFACEMETHODIMP Invoke(IShellItemArray* psiItemArray, IBindCtx* pbc) override {
-        if (m_isRoot || m_item.IsSubMenu) return S_OK;
+        if (m_isRoot) return S_OK;
 
         std::wstring finalArgs = m_item.Arguments;
         std::wstring targetPath = L"";
@@ -327,13 +330,13 @@ class CEnumCommands : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IEnumEx
 {
 public:
     CEnumCommands(const std::vector<MenuItem>& jsonItems) : m_current(0) {
-
         std::vector<MenuItem> sortedItems = jsonItems;
-        std::sort(sortedItems.begin(), sortedItems.end(), [](const MenuItem& a, const MenuItem& b) {
+
+        std::stable_sort(sortedItems.begin(), sortedItems.end(), [](const MenuItem& a, const MenuItem& b) {
             auto getSortValue = [](const std::wstring& pos) {
                 if (pos == L"Top") return 0;
                 if (pos == L"Bottom") return 2;
-                return 1;
+                return 1; // Default
                 };
             return getSortValue(a.Position) < getSortValue(b.Position);
             });
@@ -370,10 +373,7 @@ IFACEMETHODIMP CEvolveOSCommand::EnumSubCommands(IEnumExplorerCommand** ppEnum) 
         *ppEnum = Make<CEnumCommands>(LoadCustomItems()).Detach();
         return S_OK;
     }
-    if (m_item.IsSubMenu) {
-        *ppEnum = Make<CEnumCommands>(m_item.SubItems).Detach();
-        return S_OK;
-    }
+
     *ppEnum = nullptr;
     return E_NOTIMPL;
 }
@@ -410,6 +410,17 @@ public:
 
     IFACEMETHODIMP LockServer(BOOL fLock) override { return S_OK; }
 };
+
+/*void LogToDesktop(const std::wstring& msg) {
+    wchar_t desktopPath[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_DESKTOP, NULL, 0, desktopPath))) {
+        std::wstring logFile = std::wstring(desktopPath) + L"\\EvolveOS_Menu_Log.txt";
+        std::wofstream out(logFile, std::ios_base::app);
+        if (out.is_open()) {
+            out << msg << L"\n";
+        }
+    }
+}*/
 
 #pragma comment(linker, "/EXPORT:DllGetClassObject,PRIVATE")
 #pragma comment(linker, "/EXPORT:DllCanUnloadNow,PRIVATE")
