@@ -33,6 +33,9 @@ struct MenuItem {
     bool Extended;
     std::wstring SpecificExtension;
     std::wstring Position;
+
+    bool IsSubMenu;
+    std::vector<MenuItem> SubItems;
 };
 
 std::wstring ExtractJsonValue(const std::wstring& json, const std::wstring& key, size_t startPos = 0) {
@@ -70,6 +73,91 @@ bool ExtractJsonBool(const std::wstring& json, const std::wstring& key, size_t s
     return false;
 }
 
+std::wstring ExtractJsonArray(const std::wstring& json, const std::wstring& key, size_t startPos = 0) {
+    std::wstring search = L"\"" + key + L"\":";
+    size_t pos = json.find(search, startPos);
+    if (pos == std::wstring::npos) {
+        search = L"\"" + key + L"\" :";
+        pos = json.find(search, startPos);
+        if (pos == std::wstring::npos) return L"";
+    }
+
+    size_t bracketPos = json.find(L"[", pos);
+    if (bracketPos == std::wstring::npos) return L"";
+
+    int depth = 0;
+    size_t endPos = std::wstring::npos;
+    for (size_t i = bracketPos; i < json.length(); ++i) {
+        if (json[i] == L'[') depth++;
+        else if (json[i] == L']') {
+            depth--;
+            if (depth == 0) {
+                endPos = i;
+                break;
+            }
+        }
+    }
+
+    if (endPos != std::wstring::npos) {
+        return json.substr(bracketPos, endPos - bracketPos + 1);
+    }
+    return L"";
+}
+
+std::vector<MenuItem> ParseItems(const std::wstring& jsonArray) {
+    std::vector<MenuItem> items;
+    size_t pos = 0;
+
+    while (pos < jsonArray.length()) {
+        size_t objStart = jsonArray.find(L"{", pos);
+        if (objStart == std::wstring::npos) break;
+
+        int depth = 0;
+        size_t objEnd = std::wstring::npos;
+        for (size_t i = objStart; i < jsonArray.length(); ++i) {
+            if (jsonArray[i] == L'{') depth++;
+            else if (jsonArray[i] == L'}') {
+                depth--;
+                if (depth == 0) {
+                    objEnd = i;
+                    break;
+                }
+            }
+        }
+
+        if (objEnd == std::wstring::npos) break;
+
+        std::wstring objJson = jsonArray.substr(objStart, objEnd - objStart + 1);
+
+        MenuItem item;
+        item.Title = ExtractJsonValue(objJson, L"title");
+        item.ExePath = ExtractJsonValue(objJson, L"exePath");
+        item.Arguments = ExtractJsonValue(objJson, L"arguments");
+        item.Icon = ExtractJsonValue(objJson, L"icon");
+        item.Target = ExtractJsonValue(objJson, L"target");
+
+        item.Extended = ExtractJsonBool(objJson, L"extended");
+        item.SpecificExtension = ExtractJsonValue(objJson, L"specificExtension");
+        item.Position = ExtractJsonValue(objJson, L"position");
+
+        item.IsSubMenu = ExtractJsonBool(objJson, L"isSubMenu");
+
+        if (item.IsSubMenu) {
+            std::wstring subArr = ExtractJsonArray(objJson, L"subItems");
+            if (!subArr.empty()) {
+                item.SubItems = ParseItems(subArr);
+            }
+        }
+
+        if (!item.Title.empty() && (!item.ExePath.empty() || item.IsSubMenu)) {
+            items.push_back(item);
+        }
+
+        pos = objEnd + 1;
+    }
+    return items;
+}
+
 std::vector<MenuItem> LoadCustomItems() {
     std::vector<MenuItem> items;
     wchar_t localAppData[MAX_PATH];
@@ -88,26 +176,9 @@ std::vector<MenuItem> LoadCustomItems() {
                 std::wstring content(size_needed, 0);
                 MultiByteToWideChar(CP_UTF8, 0, &utf8Content[0], (int)utf8Content.size(), &content[0], size_needed);
 
-                size_t pos = 0;
-                while ((pos = content.find(L"{", pos)) != std::wstring::npos) {
-                    MenuItem item;
-                    item.Title = ExtractJsonValue(content, L"title", pos);
-                    item.ExePath = ExtractJsonValue(content, L"exePath", pos);
-                    item.Arguments = ExtractJsonValue(content, L"arguments", pos);
-                    item.Icon = ExtractJsonValue(content, L"icon", pos);
-                    item.Target = ExtractJsonValue(content, L"target", pos);
-
-                    item.Extended = ExtractJsonBool(content, L"extended", pos);
-                    item.SpecificExtension = ExtractJsonValue(content, L"specificExtension", pos);
-                    item.Position = ExtractJsonValue(content, L"position", pos);
-
-                    if (!item.Title.empty() && !item.ExePath.empty()) {
-                        items.push_back(item);
-                    }
-
-                    size_t nextPos = content.find(L"}", pos);
-                    if (nextPos == std::wstring::npos) break;
-                    pos = nextPos + 1;
+                std::wstring itemsArray = ExtractJsonArray(content, L"items");
+                if (!itemsArray.empty()) {
+                    items = ParseItems(itemsArray);
                 }
             }
         }
@@ -122,6 +193,8 @@ std::vector<MenuItem> LoadCustomItems() {
 
     return items;
 }
+
+class CEnumCommands;
 
 class CEvolveOSCommand : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IExplorerCommand>
 {
@@ -209,14 +282,14 @@ public:
     }
 
     IFACEMETHODIMP GetFlags(EXPCMDFLAGS* pFlags) override {
-        *pFlags = m_isRoot ? ECF_HASSUBCOMMANDS : ECF_DEFAULT;
+        *pFlags = (m_isRoot || m_item.IsSubMenu) ? ECF_HASSUBCOMMANDS : ECF_DEFAULT;
         return S_OK;
     }
 
     IFACEMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override;
 
     IFACEMETHODIMP Invoke(IShellItemArray* psiItemArray, IBindCtx* pbc) override {
-        if (m_isRoot) return S_OK;
+        if (m_isRoot || m_item.IsSubMenu) return S_OK;
 
         std::wstring finalArgs = m_item.Arguments;
         std::wstring targetPath = L"";
@@ -253,19 +326,19 @@ private:
 class CEnumCommands : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IEnumExplorerCommand>
 {
 public:
-    CEnumCommands() : m_current(0) {
-        auto jsonItems = LoadCustomItems();
+    CEnumCommands(const std::vector<MenuItem>& jsonItems) : m_current(0) {
 
-        std::sort(jsonItems.begin(), jsonItems.end(), [](const MenuItem& a, const MenuItem& b) {
+        std::vector<MenuItem> sortedItems = jsonItems;
+        std::sort(sortedItems.begin(), sortedItems.end(), [](const MenuItem& a, const MenuItem& b) {
             auto getSortValue = [](const std::wstring& pos) {
                 if (pos == L"Top") return 0;
                 if (pos == L"Bottom") return 2;
-                return 1; // Default
+                return 1;
                 };
             return getSortValue(a.Position) < getSortValue(b.Position);
             });
 
-        for (const auto& i : jsonItems) {
+        for (const auto& i : sortedItems) {
             m_items.push_back(Make<CEvolveOSCommand>(false, i));
         }
         InterlockedIncrement(&g_cRef);
@@ -294,7 +367,11 @@ private:
 
 IFACEMETHODIMP CEvolveOSCommand::EnumSubCommands(IEnumExplorerCommand** ppEnum) {
     if (m_isRoot) {
-        *ppEnum = Make<CEnumCommands>().Detach();
+        *ppEnum = Make<CEnumCommands>(LoadCustomItems()).Detach();
+        return S_OK;
+    }
+    if (m_item.IsSubMenu) {
+        *ppEnum = Make<CEnumCommands>(m_item.SubItems).Detach();
         return S_OK;
     }
     *ppEnum = nullptr;
