@@ -31,6 +31,7 @@ struct MenuItem {
     std::wstring Target;
 
     bool Extended;
+    bool IsSeparator;
     std::wstring SpecificExtension;
     std::wstring Position;
 };
@@ -159,10 +160,12 @@ std::vector<MenuItem> ParseItems(const std::wstring& jsonArray) {
         item.Target = ExtractJsonValue(objJson, L"target");
 
         item.Extended = ExtractJsonBool(objJson, L"extended");
+        item.IsSeparator = ExtractJsonBool(objJson, L"isSeparator");
         item.SpecificExtension = ExtractJsonValue(objJson, L"specificExtension");
         item.Position = ExtractJsonValue(objJson, L"position");
 
-        if (!item.Title.empty() && !item.ExePath.empty()) {
+        // Allowed to push if it has text/exe, OR if it's explicitly a separator
+        if ((!item.Title.empty() && !item.ExePath.empty()) || item.IsSeparator) {
             items.push_back(item);
         }
 
@@ -310,14 +313,22 @@ public:
     }
 
     IFACEMETHODIMP GetFlags(EXPCMDFLAGS* pFlags) override {
-        *pFlags = m_isRoot ? ECF_HASSUBCOMMANDS : ECF_DEFAULT;
+        if (m_isRoot) {
+            *pFlags = ECF_HASSUBCOMMANDS;
+        }
+        else if (m_item.IsSeparator) {
+            *pFlags = ECF_ISSEPARATOR;
+        }
+        else {
+            *pFlags = ECF_DEFAULT;
+        }
         return S_OK;
     }
 
     IFACEMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override;
 
     IFACEMETHODIMP Invoke(IShellItemArray* psiItemArray, IBindCtx* pbc) override {
-        if (m_isRoot) return S_OK;
+        if (m_isRoot || m_item.IsSeparator) return S_OK; // Separators aren't clickable
 
         std::wstring finalArgs = m_item.Arguments;
         std::wstring targetPath = L"";
@@ -337,9 +348,20 @@ public:
             }
         }
 
-        size_t paramPos = finalArgs.find(L"%1");
-        if (paramPos != std::wstring::npos) {
-            finalArgs.replace(paramPos, 2, targetPath);
+        // Replace %1, %V, or %v with the actual file/folder path selected
+        size_t paramPos1 = finalArgs.find(L"%1");
+        if (paramPos1 != std::wstring::npos) {
+            finalArgs.replace(paramPos1, 2, targetPath);
+        }
+
+        size_t paramPosV = finalArgs.find(L"%V");
+        if (paramPosV != std::wstring::npos) {
+            finalArgs.replace(paramPosV, 2, targetPath);
+        }
+
+        size_t paramPosv = finalArgs.find(L"%v");
+        if (paramPosv != std::wstring::npos) {
+            finalArgs.replace(paramPosv, 2, targetPath);
         }
 
         ShellExecuteW(NULL, L"open", m_item.ExePath.c_str(), finalArgs.c_str(), NULL, SW_SHOWNORMAL);
